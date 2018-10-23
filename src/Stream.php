@@ -77,7 +77,7 @@ class Stream implements SeekableIterator
      *
      * @var mixed
      */
-    protected $value;
+    protected $value = false;
 
     /**
      * Current iterator key.
@@ -122,6 +122,20 @@ class Stream implements SeekableIterator
     protected $is_seekable = false;
 
     /**
+     * PHP input has a special rewind case
+     *
+     * @var bool
+     */
+    protected $is_php_input;
+
+    /**
+     * The flags that the stream was opened with
+     *
+     * @var string
+     */
+    protected $mode;
+
+    /**
      * New instance.
      *
      * @param resource $resource stream type resource
@@ -136,7 +150,11 @@ class Stream implements SeekableIterator
             throw new TypeError(sprintf('Argument passed must be a stream resource, %s resource given', $type));
         }
 
-        $this->is_seekable = stream_get_meta_data($resource)['seekable'];
+        $streamMetadata = stream_get_meta_data($resource);
+
+        $this->is_seekable = $streamMetadata['seekable'];
+        $this->is_php_input = $streamMetadata['uri'] === "php://input";
+        $this->mode = $streamMetadata['mode'];
         $this->stream = $resource;
     }
 
@@ -340,7 +358,12 @@ class Stream implements SeekableIterator
             throw new Exception('stream does not support seeking');
         }
 
-        rewind($this->stream);
+        if ($this->is_php_input) {
+            $this->stream = fopen("php://input", $this->mode);
+        } else {
+            rewind($this->stream);
+        }
+
         $this->offset = 0;
         $this->value = false;
         if ($this->flags & SplFileObject::READ_AHEAD) {
@@ -457,18 +480,65 @@ class Stream implements SeekableIterator
     }
 
     /**
+     * @param int $offset
+     * @param int $whence
+     * @return int
+     * @throws \Exception
+     */
+    private function fSeekPhpInput(int $offset, int $whence)
+    {
+        switch ($whence) {
+            case SEEK_SET:
+                if (ftell($this->stream) === $offset) {
+                    return 0;
+                }
+
+                $this->stream = fopen("php://input", $this->mode);
+
+                return fseek($this->stream, $offset, SEEK_SET);
+
+            case SEEK_CUR:
+                if ($offset === 0) {
+                    return 0;
+                }
+
+                if ($offset < 0) {
+                    $current = ftell($this->stream);
+                    $this->stream = fopen("php://input", $this->mode);
+
+                    return fseek($this->stream, $current - $offset, SEEK_CUR);
+                }
+
+                return fseek($this->stream, $offset, SEEK_CUR);
+
+            case SEEK_END:
+                $this->stream = fopen("php://input", $this->mode);
+                $length = stream_get_meta_data($this->stream)['unread_bytes'];
+
+                return fseek($this->stream, $length + $offset, SEEK_CUR);
+        }
+
+        throw new \Exception("Unsupported Seek Whence Type");
+    }
+
+    /**
      * Seek to a position.
      *
      * @see http://php.net/manual/en/splfileobject.fseek.php
      *
-     * @throws Exception if the stream resource is not seekable
-     *
+     * @param int $offset
+     * @param int $whence
      * @return int
+     * @throws Exception if the stream resource is not seekable
      */
     public function fseek(int $offset, int $whence = SEEK_SET)
     {
         if (!$this->is_seekable) {
             throw new Exception('stream does not support seeking');
+        }
+
+        if ($this->is_php_input) {
+            return $this->fSeekPhpInput($offset, $whence);
         }
 
         return fseek($this->stream, $offset, $whence);
